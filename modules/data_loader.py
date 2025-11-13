@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 from datetime import datetime, timedelta
+import glob
 
 class DataLoader:
     def __init__(self, data_dir='data'):
@@ -257,5 +258,68 @@ class DataLoader:
                 how='left'
             )
 
-    
         return pd.DataFrame()
+
+    def delete_order(self, order_id):
+        """Usuwa zamówienie z systemu"""
+        try:
+            orders_file = f'{self.data_dir}/orders.csv'
+            if not os.path.exists(orders_file):
+                return False, "Plik zamówień nie istnieje"
+            
+            # Wczytaj istniejące zamówienia
+            orders_df = pd.read_csv(orders_file)
+            
+            # Sprawdź czy zamówienie istnieje
+            if order_id not in orders_df['order_id'].values:
+                return False, f"Zamówienie {order_id} nie istnieje"
+            
+            # Pobierz informacje o zamówieniu przed usunięciem (do logów)
+            order_info = orders_df[orders_df['order_id'] == order_id].iloc[0]
+            
+            # Usuń zamówienie
+            orders_df = orders_df[orders_df['order_id'] != order_id]
+            
+            # Zapisz zmiany
+            orders_df.to_csv(orders_file, index=False)
+            
+            # Spróbuj usunąć plik PDF
+            pdf_pattern = f"orders/Zamowienie_{order_id}_*.pdf"
+            pdf_files = glob.glob(pdf_pattern)
+            for pdf_file in pdf_files:
+                try:
+                    os.remove(pdf_file)
+                    print(f"✅ Usunięto plik PDF: {pdf_file}")
+                except Exception as e:
+                    print(f"⚠️ Nie udało się usunąć pliku PDF {pdf_file}: {e}")
+            
+            print(f"✅ Usunięto zamówienie {order_id} - {order_info.get('product_name', 'Nieznany produkt')}")
+            return True, f"Zamówienie {order_id} zostało usunięte"
+            
+        except Exception as e:
+            error_msg = f"❌ Błąd podczas usuwania zamówienia {order_id}: {e}"
+            print(error_msg)
+            return False, error_msg
+
+    def get_deletable_orders(self):
+        """Zwraca zamówienia które można usunąć"""
+        try:
+            orders_file = f'{self.data_dir}/orders.csv'
+            if not os.path.exists(orders_file):
+                return pd.DataFrame()
+            
+            orders_df = pd.read_csv(orders_file)
+            
+            # Definiujemy które zamówienia można usunąć
+            # Można usunąć tylko zamówienia które nie są w trakcie dostawy
+            deletable_statuses = ['ordered']  # Tylko złożone, ale nie wysłane
+            
+            deletable_orders = orders_df[
+                orders_df['delivery_status'].isin(deletable_statuses)
+            ]
+            
+            return deletable_orders
+            
+        except Exception as e:
+            print(f"❌ Błąd pobierania zamówień do usunięcia: {e}")
+            return pd.DataFrame()

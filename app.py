@@ -5,6 +5,7 @@ from modules.classifier import SimpleClassifier
 from modules.supplier_matcher import SupplierMatcher
 from modules.pdf_generator import PDFGenerator
 from modules.auto_reorder import AutoReorderSystem
+from modules.time_simulator import TimeSimulator
 import uuid
 from datetime import datetime, timedelta
 import os
@@ -25,10 +26,11 @@ def init_system():
         matcher = SupplierMatcher(data_loader.suppliers, data_loader.purchase_orders)
         pdf_generator = PDFGenerator()
         auto_reorder = AutoReorderSystem(data_loader, matcher, pdf_generator)
-        return data_loader, classifier, matcher, pdf_generator, auto_reorder
-    return None, None, None, None, None
+        time_simulator = TimeSimulator('data')
+        return data_loader, classifier, matcher, pdf_generator, auto_reorder, time_simulator
+    return None, None, None, None, None, None
 
-data_loader, classifier, matcher, pdf_generator, auto_reorder = init_system()
+data_loader, classifier, matcher, pdf_generator, auto_reorder, time_simulator = init_system()
 
 if data_loader is None:
     st.error("❌ Błąd ładowania danych! Sprawdź pliki CSV w folderze 'data/'")
@@ -38,14 +40,46 @@ if data_loader is None:
 st.title("🏢 AI Procurement System")
 st.markdown("### System automatycznego zarządzania zamówieniami")
 
+# Panel sterowania czasem w sidebar
+st.sidebar.header("⏰ Symulacja Czasu")
+sim_info = time_simulator.get_simulation_info()
+
+st.sidebar.info(f"""
+**Data symulacji:** {sim_info['current_simulation_date']}  
+**Rzeczywista data:** {sim_info['real_world_date']}  
+**Dni do przodu:** {sim_info['days_ahead']}
+""")
+
+# Proste przyciski bez skomplikowanej logiki stanu
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.button("⏩ +1 dzień", use_container_width=True, key="advance_1_day"):
+        new_date = time_simulator.advance_time(1)
+        time_simulator.simulate_daily_operations(data_loader)
+        st.sidebar.success(f"Przesunięto czas o 1 dzień na: {new_date}")
+        st.rerun()
+
+with col2:
+    if st.button("⏩ +7 dni", use_container_width=True, key="advance_7_days"):
+        new_date = time_simulator.advance_time(7)
+        for _ in range(7):
+            time_simulator.simulate_daily_operations(data_loader)
+        st.sidebar.success(f"Przesunięto czas o 7 dni na: {new_date}")
+        st.rerun()
+
+if st.sidebar.button("🔄 Resetuj czas", type="secondary", key="reset_time"):
+    time_simulator.reset_simulation()
+    st.sidebar.success("Zresetowano czas symulacji")
+    st.rerun()
+
 # Debug info w sidebar
 st.sidebar.header("🔍 Debug Info")
-if st.sidebar.button("Wyczyść debug"):
+if st.sidebar.button("Wyczyść debug", key="clear_debug"):
     if 'debug_info' in st.session_state:
         del st.session_state.debug_info
 
 # Zakładki
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Złóż zapotrzebowanie", "📑 Umowy terminowe", "📊 Stany magazynowe", "🏭 Zamówienia produkcyjne", "🚚 W Dostawie", "📦 Historia zamówień"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📋 Złóż zapotrzebowanie", "📑 Umowy terminowe", "📊 Stany magazynowe", "🏭 Zamówienia produkcyjne", "🚚 W Dostawie", "📦 Historia zamówień", "🗑️ Zarządzanie zamówieniami"])
 
 with tab1:
     st.header("Złóż nowe zapotrzebowanie")
@@ -203,7 +237,7 @@ with tab1:
                 )
                 
                 if similar:
-                    st.markdown("**💡 Podobne produkty w systemie:**")
+                    st.markdown("**💡 Podobne produkty w systeme:**")
                     for product in similar:
                         st.write(f"- {product.get('product_name', 'Nieznany')} (dopasowanie: {product.get('similarity_score', 0)})")
                 
@@ -471,7 +505,33 @@ with tab6:
                 
                 orders_display = orders_display.tail(show_last)
                 
-                st.dataframe(orders_display, use_container_width=True)
+                # Wyświetl z przyciskami usuwania
+                for _, order in orders_display.iterrows():
+                    with st.expander(f"📦 {order['product_name']} - {order['order_id']}"):
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**Zamówienie:** {order['order_id']}")
+                            st.write(f"**Produkt:** {order['product_name']}")
+                            st.write(f"**Ilość:** {order['quantity']} {order.get('unit', 'szt.')}")
+                            st.write(f"**Dostawca:** {order['supplier_name']}")
+                            st.write(f"**Status:** {order['delivery_status']}")
+                            st.write(f"**Data zamówienia:** {order['timestamp']}")
+                        
+                        with col2:
+                            if 'estimated_delivery' in order and pd.notna(order['estimated_delivery']):
+                                st.write(f"**Przewidywana dostawa:** {order['estimated_delivery']}")
+                        
+                        with col3:
+                            # Przycisk usuwania tylko dla zamówień ze statusem 'ordered'
+                            if order['delivery_status'] == 'ordered':
+                                if st.button("🗑️ Usuń", key=f"delete_hist_{order['order_id']}", type="secondary"):
+                                    success, message = data_loader.delete_order(order['order_id'])
+                                    if success:
+                                        st.success(f"✅ {message}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {message}")
                 
                 # Statystyki
                 col1, col2, col3 = st.columns(3)
@@ -491,6 +551,150 @@ with tab6:
             st.error(f"Błąd ładowania historii zamówień: {e}")
     else:
         st.info("Brak zamówień w historii")
+
+with tab7:
+    st.header("🗑️ Zarządzanie zamówieniami")
+    st.markdown("### Usuwanie i zarządzanie zamówieniami")
+    
+    # Sekcja 1: Podgląd wszystkich zamówień
+    st.subheader("📋 Wszystkie zamówienia w systemie")
+    
+    try:
+        orders_file = 'data/orders.csv'
+        if os.path.exists(orders_file):
+            all_orders = pd.read_csv(orders_file)
+            
+            if not all_orders.empty:
+                # Filtry
+                col1, col2 = st.columns(2)
+                with col1:
+                    status_filter = st.selectbox(
+                        "Filtruj według statusu:",
+                        ["Wszystkie", "ordered", "in_transit", "delivered", "cancelled"],
+                        key="management_status"
+                    )
+                
+                with col2:
+                    type_filter = st.selectbox(
+                        "Filtruj według typu:",
+                        ["Wszystkie", "Standardowe", "Produkcyjne"],
+                        key="management_type"
+                    )
+                
+                # Filtruj zamówienia
+                filtered_orders = all_orders.copy()
+                
+                if status_filter != "Wszystkie":
+                    filtered_orders = filtered_orders[filtered_orders['delivery_status'] == status_filter]
+                
+                if type_filter != "Wszystkie":
+                    filtered_orders = filtered_orders[filtered_orders['order_type'] == type_filter]
+                
+                # Wyświetl przefiltrowane zamówienia
+                st.dataframe(
+                    filtered_orders[[
+                        'order_id', 'product_name', 'order_type', 
+                        'delivery_status', 'quantity', 'supplier_name',
+                        'timestamp'
+                    ]],
+                    use_container_width=True
+                )
+                
+                st.metric("Łączna liczba zamówień", len(all_orders))
+                st.metric("Przefiltrowane zamówienia", len(filtered_orders))
+            else:
+                st.info("📭 Brak zamówień w systeme")
+        else:
+            st.info("📭 Brak pliku z zamówieniami")
+            
+    except Exception as e:
+        st.error(f"❌ Błąd ładowania zamówień: {e}")
+    
+    # Sekcja 2: Usuwanie zamówień
+    st.subheader("🗑️ Usuwanie zamówień")
+    st.warning("""
+    **Uwaga:** Możesz usunąć tylko zamówienia ze statusem **'ordered'** (złożone).
+    Zamówienia w dostawie lub dostarczone nie mogą być usunięte.
+    """)
+    
+    # Pobierz zamówienia które można usunąć
+    deletable_orders = data_loader.get_deletable_orders()
+    
+    if not deletable_orders.empty:
+        st.success(f"📋 Znaleziono {len(deletable_orders)} zamówień które można usunąć")
+        
+        for _, order in deletable_orders.iterrows():
+            with st.expander(f"🗑️ {order['order_id']} - {order['product_name']}"):
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
+                with col1:
+                    st.write(f"**Produkt:** {order['product_name']}")
+                    st.write(f"**Ilość:** {order['quantity']} {order.get('unit', 'szt.')}")
+                    st.write(f"**Dostawca:** {order['supplier_name']}")
+                    st.write(f"**Data złożenia:** {order['timestamp']}")
+                    st.write(f"**Typ:** {order['order_type']}")
+                
+                with col2:
+                    st.write(f"**Status:** {order['delivery_status']}")
+                    if 'estimated_delivery' in order and pd.notna(order['estimated_delivery']):
+                        st.write(f"**Przewidywana dostawa:** {order['estimated_delivery']}")
+                
+                with col3:
+                    # Przycisk usuwania z potwierdzeniem
+                    if st.button("🗑️ Usuń", key=f"delete_{order['order_id']}", type="secondary"):
+                        # Potwierdzenie usunięcia
+                        if st.session_state.get(f"confirm_delete_{order['order_id']}", False):
+                            # Właściwe usunięcie
+                            success, message = data_loader.delete_order(order['order_id'])
+                            if success:
+                                st.success(f"✅ {message}")
+                                st.balloons()
+                                # Odśwież po usunięciu
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {message}")
+                        else:
+                            # Ustaw potwierdzenie
+                            st.session_state[f"confirm_delete_{order['order_id']}"] = True
+                            st.warning(f"⚠️ Czy na pewno chcesz usunąć zamówienie {order['order_id']}?")
+                            st.info("Kliknij ponownie 'Usuń' aby potwierdzić.")
+                    
+                    # Przycisk anulowania (jeśli oczekuje na potwierdzenie)
+                    if st.session_state.get(f"confirm_delete_{order['order_id']}", False):
+                        if st.button("❌ Anuluj", key=f"cancel_{order['order_id']}"):
+                            st.session_state[f"confirm_delete_{order['order_id']}"] = False
+                            st.rerun()
+    else:
+        st.info("✅ Brak zamówień do usunięcia - wszystkie zamówienia są w trakcie realizacji lub już dostarczone")
+    
+    # Sekcja 3: Statystyki systemu
+    st.subheader("📊 Statystyki systemu")
+    
+    if os.path.exists(orders_file):
+        try:
+            orders_df = pd.read_csv(orders_file)
+            
+            if not orders_df.empty:
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    total_orders = len(orders_df)
+                    st.metric("Łącznie zamówień", total_orders)
+                
+                with col2:
+                    ordered_count = len(orders_df[orders_df['delivery_status'] == 'ordered'])
+                    st.metric("Do realizacji", ordered_count)
+                
+                with col3:
+                    in_transit_count = len(orders_df[orders_df['delivery_status'] == 'in_transit'])
+                    st.metric("W dostawie", in_transit_count)
+                
+                with col4:
+                    delivered_count = len(orders_df[orders_df['delivery_status'] == 'delivered'])
+                    st.metric("Dostarczone", delivered_count)
+                
+        except Exception as e:
+            st.error(f"❌ Błąd generowania statystyk: {e}")
 
 # Uruchomienie
 if __name__ == "__main__":
